@@ -1,3 +1,4 @@
+#include <unistd.h>
 #include <openssl/ripemd.h>
 #include <openssl/ec.h>
 #include <openssl/bn.h>
@@ -5,6 +6,33 @@
 #include <openssl/obj_mac.h>
 
 #include "bitcoin.h"
+
+#define BUF_INIT  { NULL, 0 }
+
+typedef struct buf_t {
+    uint8_t *data;
+    uint64_t len;
+} buf_t;
+
+typedef struct txin_t {
+    uint8_t prevhash[32];
+    uint32_t previndex;
+    buf_t scriptsig;
+} txin_t;
+
+typedef struct txout_t {
+    int64_t txvalue;
+    buf_t pkscript;
+} txout_t;
+
+typedef struct tx_t {
+    uint32_t version;
+    uint64_t incount;;
+    txin_t *inputs;
+    uint64_t outcount;
+    txout_t *outputs;
+    uint32_t locktime;
+} tx_t;
 
 static const uint32_t sha256_constants[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
@@ -128,16 +156,25 @@ void sha256_encode(uint8_t *msg, uint64_t len, uint8_t digest[SHA256_SIZE])
     }
 }
 
-char *buftohex(uint8_t *buf, uint64_t len)
+void ecdsa_sign(uint8_t *msg, uint64_t len, uint8_t *privkey, uint8_t *sig)
 {
-    uint64_t i;
-    char *string = malloc(len * 2 + 1);
+    BIGNUM privnum;
+    BN_init(&privnum);
+    BN_bin2bn(privkey, PRIVKEY_SIZE, &privnum);
 
-    for (i = 0; i < len; i++)
-        sprintf(string + i * 2, "%02x", buf[i]);
-    string[i * 2] = '\0';
+    EC_KEY *eckey = EC_KEY_new();
+    EC_GROUP *curve = EC_GROUP_new_by_curve_name(NID_secp256k1);
 
-    return string;
+    EC_KEY_set_group(eckey, curve);
+    EC_KEY_set_private_key(eckey, &privnum);
+
+    ECDSA_SIG *esig = ECDSA_do_sign(msg, len, eckey);
+
+    int verify = ECDSA_do_verify(msg, len, esig, eckey);
+    if (!verify)
+        errx("couldn't sign message");
+
+    i2d_ECDSA_SIG(esig, &sig);
 }
 
 char *base58_encode(uint8_t *msg, uint64_t msglen)
@@ -222,16 +259,77 @@ void secp256k1_privtopub(uint8_t *priv, uint64_t privlen,
     EC_POINT_free(pubpoint);
 }
 
+void hash160_encode(uint8_t *msg, uint64_t len, uint8_t hash[HASH160_SIZE])
+{
+    uint8_t s256[SHA256_SIZE];
+
+    sha256_encode(msg, len, s256);
+    RIPEMD160(s256, sizeof(s256), hash);
+}
+
+uint8_t *hextobuf(char *hex, uint64_t *buflen)
+{
+    uint64_t size = (strlen(hex) / 2) + (strlen(hex) % 2);
+    uint8_t *buf = malloc(size);
+
+    memset(buf, 0, size);
+
+    for (uint64_t i = 0; i < strlen(hex); i++) {
+        uint8_t v;
+        char c = hex[i];
+
+        if (c >= 'a' && c <= 'z')
+            v = 10 + c - 'a';
+        else if (c >= 'A' && c <= 'Z')
+            v = 10 + c - 'A';
+        else if (c >= '0' && c <= '9')
+            v = c - '0';
+        else
+            errx("invalid hex string: %s", hex);
+
+        buf[i / 2] |= (v << (4 * (i % 2 == 0)));
+    }
+
+    if (buflen)
+        *buflen = size;
+
+    return buf;
+}
+
+char *buftohex(uint8_t *buf, uint64_t len)
+{
+    uint64_t i;
+    char *string = malloc(len * 2 + 1);
+
+    for (i = 0; i < len; i++)
+        sprintf(string + i * 2, "%02x", buf[i]);
+    string[i * 2] = '\0';
+
+    return string;
+}
+
+
+void help(void)
+{
+    fprintf(stderr, "usage:\n");
+    fprintf(stderr, "  send-bitcoin help\n");
+    fprintf(stderr, "  send-bitcoin gen [passphrase]\n");
+    fprintf(stderr, "  send-bitcoin info <private key>\n");
+    fprintf(stderr, "  send-bitcoin send -p <src private key>"
+                    " -d <dst public key> -o <output hash>"
+                    " -v <satoshis> -i <output index>\n");
+
+    exit(1);
+}
 
 int gen(int argc, char **argv)
 {
     uint8_t privkey[SHA256_SIZE];
 
-    if (argc < 2) {
+    if (argc < 2)
         arc4random_buf(privkey, sizeof(privkey));
-    } else {
+    else
         sha256_encode((uint8_t *)argv[1], strlen(argv[1]), privkey);
-    }
 
     char *wif = base58check_encode(0x80, privkey, sizeof(privkey));
     printf("WIF: %s\n", wif);
@@ -244,11 +342,8 @@ int gen(int argc, char **argv)
     printf("public key: %s\n", pubstr);
     free(pubstr);
 
-    uint8_t hash[SHA256_SIZE];
-    sha256_encode(pubkey, sizeof(pubkey), hash);
-
-    uint8_t binaddr[RIPEMD160_DIGEST_LENGTH];
-    RIPEMD160(hash, sizeof(hash), binaddr);
+    uint8_t binaddr[HASH160_SIZE];
+    hash160_encode(pubkey, sizeof(pubkey), binaddr);
 
     char *address = base58check_encode(0x0, binaddr, sizeof(binaddr));
     printf("address: %s\n", address);
@@ -257,16 +352,306 @@ int gen(int argc, char **argv)
     return 0;
 }
 
+int info(int argc, char **argv)
+{
+    return 0;
+}
+
+void buf_init(buf_t *buf)
+{
+    buf->data = NULL;
+    buf->len = 0;
+}
+
+void buf_reset(buf_t *buf)
+{
+    free(buf->data);
+
+    buf_init(buf);
+}
+
+void buf_append(buf_t *buf, void *data, uint64_t size)
+{
+    uint64_t oldlen = buf->len;
+
+    buf->len += size;
+    buf->data = realloc(buf->data, buf->len);
+    memcpy(buf->data + oldlen, data, size);
+}
+
+void buf_append_u8(buf_t *buf, uint8_t v)
+{
+    buf_append(buf, &v, sizeof(v));
+}
+
+void buf_append_u32n(buf_t *buf, uint32_t v)
+{
+    uint32_t vn = 0;
+
+    vn |= (v >> 24) & 0x000000ff;
+    vn |= (v >>  8) & 0x0000ff00;
+    vn |= (v <<  8) & 0x00ff0000;
+    vn |= (v << 24) & 0xff000000;
+
+    buf_append(buf, &vn, sizeof(vn));
+}
+
+void buf_append_u64n(buf_t *buf, uint64_t v)
+{
+    uint64_t vn = 0;
+
+    vn |= (v >> 56) & 0x00000000000000ff;
+    vn |= (v >> 40) & 0x000000000000ff00;
+    vn |= (v >> 24) & 0x0000000000ff0000;
+    vn |= (v >>  8) & 0x00000000ff000000;
+    vn |= (v <<  8) & 0x000000ff00000000;
+    vn |= (v << 24) & 0x0000ff0000000000;
+    vn |= (v << 40) & 0x00ff000000000000;
+    vn |= (v << 56) & 0xff00000000000000;
+
+    buf_append(buf, &vn, sizeof(vn));
+}
+
+void buf_append_varint(buf_t *buf, uint64_t v)
+{
+    if (v >= 0xfd)
+        errx("unsupported varint: %llx", v);
+
+    buf_append_u8(buf, v & 0xff);
+}
+
+void buf_append_buf(buf_t *buf, buf_t *d)
+{
+    buf_append(buf, d->data, d->len);
+}
+
+void txin_init(txin_t *txin, uint8_t *prevout, unsigned previndex)
+{
+    memset(txin, 0, sizeof(*txin));
+
+    memcpy(txin->prevhash, prevout, sizeof(txin->prevhash));
+    txin->previndex = previndex;
+}
+
+void txin_serialize(txin_t *txin, buf_t *out)
+{
+    char revouthash[32];
+
+    for (unsigned i = 0; i < sizeof(txin->prevhash); i++)
+        revouthash[i] = txin->prevhash[sizeof(txin->prevhash) - i - 1];
+
+    buf_append(out, revouthash, sizeof(revouthash));
+    buf_append_u32n(out, txin->previndex);
+
+    buf_append_varint(out, txin->scriptsig.len);
+    buf_append_buf(out, &txin->scriptsig);
+    buf_append_u32n(out, 0xffffff);
+}
+
+void txout_init(txout_t *txout, uint64_t value)
+{
+    memset(txout, 0, sizeof(*txout));
+
+    txout->txvalue = value;
+}
+
+void txout_serialize(txout_t *txout, buf_t *out)
+{
+    buf_append_u64n(out, txout->txvalue);
+    buf_append_varint(out, txout->pkscript.len);
+    buf_append_buf(out, &txout->pkscript);
+}
+
+void tx_init(tx_t *tx)
+{
+    memset(tx, 0, sizeof(*tx));
+
+    tx->version = 0x01;
+    tx->locktime = 0;
+}
+
+void tx_serialize(tx_t *tx, buf_t *out)
+{
+    buf_append_u32n(out, tx->version);
+
+    buf_append_varint(out, tx->incount);
+    for (unsigned i = 0; i< tx->incount; i++)
+        txin_serialize(&tx->inputs[i], out);
+
+    buf_append_varint(out, tx->outcount);
+    for (unsigned i = 0; i < tx->outcount; i++)
+        txout_serialize(&tx->outputs[i], out);
+
+    buf_append_u32n(out, tx->locktime);
+}
+
+void tx_set_input(tx_t *tx, txin_t *txin)
+{
+    tx->incount = 1;
+    tx->inputs = txin;
+}
+
+void tx_set_output(tx_t *tx, txout_t *txout)
+{
+    tx->outcount = 1;
+    tx->outputs = txout;
+}
+
+void tx_sign(tx_t *tx, buf_t *bin, uint8_t *privkey, uint8_t *sig)
+{
+    uint8_t s256_1[SHA256_SIZE];
+    uint8_t s256_2[SHA256_SIZE];
+
+    sha256_encode(bin->data, bin->len, s256_1);
+    sha256_encode(s256_1, sizeof(s256_1), s256_2);
+
+    ecdsa_sign(s256_2, sizeof(s256_2), privkey, sig);
+}
+
+void make_scriptpubkey(buf_t *script, uint8_t *pubkey)
+{
+    uint8_t pubkeyhash[HASH160_SIZE];
+
+    buf_append_u8(script, 0x76); // DUP
+    buf_append_u8(script, 0xa9); // HASH160
+    buf_append_u8(script, 0x14); // PUSHDATA
+
+    hash160_encode(pubkey, PUBKEY_SIZE, pubkeyhash);
+    buf_append(script, pubkeyhash, sizeof(pubkeyhash));
+
+    buf_append_u8(script, 0x88); // EQUALVERIFY
+    buf_append_u8(script, 0xac); // CHECKSIG
+}
+
+void make_scriptsig(buf_t *script, uint8_t *sig, uint8_t *pubkey)
+{
+    buf_append_u8(script, 0x47); // PUSHDATA
+
+    buf_append(script, sig, DERSIG_SIZE);
+
+    buf_append_u8(script, 0x01);
+    buf_append_u8(script, 0x41); // PUSHDATA
+
+    buf_append(script, pubkey, PUBKEY_SIZE);
+}
+
+void make_signedtx(uint8_t *privkey, uint8_t *pubkey, uint8_t *prevhash,
+                   unsigned previndex, uint64_t satoshis, buf_t *out)
+{
+    txin_t txin;
+    txin_init(&txin, prevhash, previndex);
+
+    uint8_t srcpubkey[PUBKEY_SIZE];
+    secp256k1_privtopub(privkey, PRIVKEY_SIZE, srcpubkey);
+    make_scriptpubkey(&txin.scriptsig, srcpubkey);
+
+    txout_t txout;
+    txout_init(&txout, satoshis);
+
+    make_scriptpubkey(&txout.pkscript, pubkey);
+
+    tx_t tx;
+    tx_init(&tx);
+    tx_set_input(&tx, &txin);
+    tx_set_output(&tx, &txout);
+
+    buf_t buftosign = BUF_INIT;
+    tx_serialize(&tx, &buftosign);
+    buf_append_u32n(&buftosign, 0x00000001);
+
+    uint8_t signature[DERSIG_SIZE];
+    tx_sign(&tx, &buftosign, privkey, signature);
+
+    buf_reset(&txin.scriptsig);
+    make_scriptsig(&txin.scriptsig, signature, pubkey);
+
+    tx_serialize(&tx, out);
+}
+
+int send(int argc, char **argv)
+{
+    int opt;
+    uint64_t privlen, publen, prevhashlen;
+    uint8_t *privkey = NULL, *pubkey = NULL, *prevhash = NULL;
+    uint32_t outputindex = 0, satoshis = 0;
+
+    while ((opt = getopt(argc, argv, "p:d:o:i:v:")) != -1) {
+        switch (opt) {
+        case 'p':
+            privkey = hextobuf(optarg, &privlen);
+            break;
+        case 'd':
+            pubkey = hextobuf(optarg, &publen);
+            break;
+        case 'o':
+            prevhash = hextobuf(optarg, &prevhashlen);
+            break;
+        case 'i':
+            outputindex = atoi(optarg);
+            break;
+        case 'v':
+            satoshis = atoi(optarg);
+            break;
+        default:
+            help();
+            break;
+        }
+    }
+
+    if (!privlen || !publen || !prevhashlen || !satoshis)
+      help();
+
+    if (privlen != PRIVKEY_SIZE || publen != PUBKEY_SIZE || prevhashlen != 32)
+      errx("invalid key format");
+
+    buf_t signedtx = BUF_INIT;
+
+    make_signedtx(privkey, pubkey, prevhash, outputindex, satoshis, &signedtx);
+
+    printf("size: %lld\n", signedtx.len);
+    printf("payload: %s\n", buftohex(signedtx.data, signedtx.len));
+
+    free(privkey);
+    free(pubkey);
+    free(prevhash);
+
+    return 0;
+}
+
+void errx(char *fmt, ...)
+{
+    va_list valist;
+
+    char *errstr;
+    asprintf(&errstr, "error: %s\n", fmt);
+
+    va_start(valist, fmt);
+    vfprintf(stderr, errstr, valist);
+    va_end(valist);
+
+    free(errstr);
+
+    exit(1);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2)
-        return 1;
+        help();
 
-    if (!strcmp(argv[1], "test")) {
+    argc--;
+    argv++;
+
+    if (!strcmp(argv[0], "test"))
         return test();
-    } else if (!strcmp(argv[1], "gen")) {
-        return gen(argc - 1, argv + 1);
-    }
+    else if (!strcmp(argv[0], "gen"))
+        return gen(argc, argv);
+    else if (!strcmp(argv[0], "info"))
+        return info(argc, argv);
+    else if (!strcmp(argv[0], "send"))
+        return send(argc, argv);
+    else
+        help();
 
     return 0;
 }

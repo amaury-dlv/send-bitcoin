@@ -1,6 +1,26 @@
 #include "bitcoin.h"
 
-static int test_sha256()
+static int test_hexstr(void)
+{
+    int err = 0;
+
+    char *expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    uint64_t buflen;
+    uint8_t *buf = hextobuf(expected, &buflen);
+
+    char *actual = buftohex(buf, buflen);
+
+    free(buf);
+
+    err = err || strcmp(expected, actual);
+
+    free(actual);
+
+    return err;
+}
+
+static int test_sha256(void)
 {
     int err = 0;
 
@@ -54,7 +74,7 @@ static int test_sha256()
     return err;
 }
 
-static int test_base58()
+static int test_base58(void)
 {
     int err = 0;
     char *res;
@@ -74,7 +94,7 @@ static int test_base58()
     return err;
 }
 
-static int test_base58check()
+static int test_base58check(void)
 {
     int err = 0;
     char *res;
@@ -128,6 +148,9 @@ int test(void)
 {
     int err = 0;
 
+    int hexstrerr = test_hexstr();
+    printf("hexstr:\t\t%s\n", hexstrerr ? "failed" : "ok");
+
     int sha256err = test_sha256();
     printf("sha256:\t\t%s\n", sha256err ? "failed" : "ok");
     err = err || sha256err;
@@ -144,9 +167,8 @@ int test(void)
     printf("secp256k1:\t%s\n", secp256k1err ? "failed" : "ok");
     err = err || secp256k1err;
 
-    if (err) {
+    if (err)
         return 1;
-    }
 
     return 0;
 }
