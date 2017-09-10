@@ -13,6 +13,8 @@
 #define PUBKEY_SIZE        65
 #define HASH160_SIZE       20
 
+#define MAIN_MAGIC         0xD9B4BEF9
+
 void errx(char *fmt, ...) __attribute__((noreturn, format(printf, 1, 2)));
 
 void sha256_encode(uint8_t *msg, uint64_t len,

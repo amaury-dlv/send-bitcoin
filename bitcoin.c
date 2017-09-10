@@ -14,6 +14,11 @@ typedef struct buf_t {
     uint64_t len;
 } buf_t;
 
+typedef struct bufsec_t {
+    char *name;
+    int size;
+} bufsec_t;
+
 typedef struct txin_t {
     uint8_t prevhash[32];
     uint32_t previndex;
@@ -425,6 +430,32 @@ void buf_append_buf(buf_t *buf, buf_t *d)
     buf_append(buf, d->data, d->len);
 }
 
+void buf_dump(buf_t *buf, bufsec_t sections[])
+{
+    uint64_t i = 0, sec = 0;
+
+    while (i < buf->len) {
+        char *secname;
+        uint64_t j;
+
+        if (sections[sec].name) {
+            secname = sections[sec].name;
+            j = sections[sec].size;
+            if (j > buf->len) j = buf->len;
+            sec++;
+        } else {
+            secname = "<trailing>";
+            j = buf->len - i;
+        }
+
+        char *hex = buftohex(&buf->data[i], j);
+        printf("%s\n    %s\n", secname, hex);
+        free(hex);
+
+        i += j;
+    }
+}
+
 void txin_init(txin_t *txin, uint8_t *prevout, unsigned previndex)
 {
     memset(txin, 0, sizeof(*txin));
@@ -445,7 +476,7 @@ void txin_serialize(txin_t *txin, buf_t *out)
 
     buf_append_varint(out, txin->scriptsig.len);
     buf_append_buf(out, &txin->scriptsig);
-    buf_append_u32n(out, 0xffffff);
+    buf_append_u32n(out, 0xffffffff);
 }
 
 void txout_init(txout_t *txout, uint64_t value)
@@ -568,6 +599,24 @@ void make_signedtx(uint8_t *privkey, uint8_t *pubkey, uint8_t *prevhash,
     tx_serialize(&tx, out);
 }
 
+void make_msg(char *cmd, buf_t *payload, buf_t *out)
+{
+    uint8_t checksum0[SHA256_SIZE];
+    uint8_t checksum1[SHA256_SIZE];
+    char cmdbuf[12] = {0};
+
+    sha256_encode(payload->data, payload->len, checksum0);
+    sha256_encode(checksum0, sizeof(checksum0), checksum1);
+
+    memcpy(cmdbuf, cmd, strlen(cmd));
+
+    buf_append_u32n(out, MAIN_MAGIC);
+    buf_append(out, cmdbuf, sizeof(cmdbuf));
+    buf_append_u32n(out, payload->len);
+    buf_append(out, checksum1, 4);
+    buf_append_buf(out, payload);
+}
+
 int send(int argc, char **argv)
 {
     int opt;
@@ -609,7 +658,40 @@ int send(int argc, char **argv)
     make_signedtx(privkey, pubkey, prevhash, outputindex, satoshis, &signedtx);
 
     printf("size: %lld\n", signedtx.len);
-    printf("payload: %s\n", buftohex(signedtx.data, signedtx.len));
+    printf("payload: %s\n\n", buftohex(signedtx.data, signedtx.len));
+
+    buf_t msg = BUF_INIT;
+
+    make_msg("tx", &signedtx, &msg);
+
+#if 0
+    bufsec_t sections[] = {
+        { "Magic",          4 },
+        { "Command",       12 },
+        { "Length",         4 },
+        { "Checksum",       4 },
+        { "Version",        4 },
+        { "Input-count",    1 },
+        { " Prev-Hash",    32 },
+        { " Prev-Index",    4 },
+        { " Script-Length", 1 },
+        { " ScriptSig",     1 },
+        { "  Signature",   70 },
+        { "  Hash-Push",    2 },
+        { "  Hash-type",   65 },
+        { " Sequence",      4 },
+        { "Output-count",   1 },
+        { " Satoshis",      8 },
+        { " Script-Length", 1 },
+        { " ScriptPubKey",  3 },
+        { "  Pubkey-hash", 20 },
+        { "  Verif-Check",  2 },
+        { "Locktime",       4 },
+        { NULL, 0 },
+    };
+
+    buf_dump(&msg, sections);
+#endif
 
     free(privkey);
     free(pubkey);
