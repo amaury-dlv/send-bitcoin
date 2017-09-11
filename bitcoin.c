@@ -331,6 +331,7 @@ void help(void)
 {
     fprintf(stderr, "usage:\n");
     fprintf(stderr, "  send-bitcoin help\n");
+    fprintf(stderr, "  send-bitcoin listen\n");
     fprintf(stderr, "  send-bitcoin gen [passphrase]\n");
     fprintf(stderr, "  send-bitcoin info <private key>\n");
     fprintf(stderr, "  send-bitcoin send -p <src private key>"
@@ -820,7 +821,7 @@ int sendtransac(int argc, char **argv)
 
     make_msg("tx", &signedtx, &msg);
 
-#if 1
+#if 0
     bufsec_t txsects[] = {
         { "Magic",          4 },
         { "Command",       12 },
@@ -852,13 +853,22 @@ int sendtransac(int argc, char **argv)
 #endif
 
 
+    free(privkey);
+    free(pubkey);
+    free(prevhash);
+
+    return 0;
+}
+
+int snoop(int argc, char **argv)
+{
     buf_t versionpl = BUF_INIT;
     make_version(&versionpl);
 
     buf_t versionmsg = BUF_INIT;
     make_msg("version", &versionpl, &versionmsg);
 
-#if 1
+#if 0
     bufsec_t versionsects[] = {
         { "Magic",      4 },
         { "Command",   12 },
@@ -915,16 +925,12 @@ int sendtransac(int argc, char **argv)
     if (p == NULL)
         errx("failed to connect");
 
-    printf("connected!\n");
+    printf("connected!\n\n");
 
     peer_sendmsg(sockfd, &versionmsg);
 
     for (;;)
         peer_rcvmsg(sockfd);
-
-    free(privkey);
-    free(pubkey);
-    free(prevhash);
 
     return 0;
 }
@@ -961,6 +967,8 @@ int main(int argc, char **argv)
         return info(argc, argv);
     else if (!strcmp(argv[0], "send"))
         return sendtransac(argc, argv);
+    else if (!strcmp(argv[0], "listen"))
+        return snoop(argc, argv);
     else
         help();
 
