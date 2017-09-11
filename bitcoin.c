@@ -1,8 +1,12 @@
+#include <netdb.h>
 #include <unistd.h>
-#include <openssl/ripemd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/socket.h>
 #include <openssl/ec.h>
 #include <openssl/bn.h>
 #include <openssl/ecdsa.h>
+#include <openssl/ripemd.h>
 #include <openssl/obj_mac.h>
 
 #include "bitcoin.h"
@@ -38,6 +42,18 @@ typedef struct tx_t {
     txout_t *outputs;
     uint32_t locktime;
 } tx_t;
+
+typedef struct __attribute__((packed)) msghdr_t {
+    uint32_t magic;
+    char cmd[12];
+    uint32_t length;
+    uint32_t checksum;
+} msghdr_t;
+
+typedef struct cmdhandler_t {
+    char *cmd;
+    void (*func)(int sockfd, msghdr_t *header, uint8_t *payload, int incoming);
+} cmdhandler_t;
 
 static const uint32_t sha256_constants[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
@@ -118,10 +134,7 @@ void sha256_encode(uint8_t *msg, uint64_t len, uint8_t digest[SHA256_SIZE])
 
     uint64_t bitlen = len * 8;
 
-    for (;;) {
-        if (len < 64)
-            break;
-
+    while (len >= 64) {
         sha256_process(msg, H);
 
         msg += 64;
@@ -417,9 +430,29 @@ void buf_append_varint(buf_t *buf, uint64_t v)
     buf_append_u8(buf, v & 0xff);
 }
 
+void buf_append_varstr(buf_t *buf, char *str)
+{
+    buf_append_varint(buf, strlen(str));
+    buf_append(buf, str, strlen(str));
+}
+
 void buf_append_buf(buf_t *buf, buf_t *d)
 {
     buf_append(buf, d->data, d->len);
+}
+
+void buf_append_nwaddr(buf_t *buf, char *ip)
+{
+    uint8_t addr[16] = {0};
+
+    addr[10] = 0xff;
+    addr[11] = 0xff;
+
+    inet_pton(AF_INET, ip, addr + 12);
+
+    buf_append_u64(buf, SERVICES);
+    buf_append(buf, addr, sizeof(addr));
+    buf_append_u16n(buf, PORTN);
 }
 
 void buf_dump(buf_t *buf, bufsec_t sections[])
@@ -464,11 +497,11 @@ void txin_serialize(txin_t *txin, buf_t *out)
         revouthash[i] = txin->prevhash[sizeof(txin->prevhash) - i - 1];
 
     buf_append(out, revouthash, sizeof(revouthash));
-    buf_append_u32n(out, txin->previndex);
+    buf_append_u32(out, txin->previndex);
 
     buf_append_varint(out, txin->scriptsig.len);
     buf_append_buf(out, &txin->scriptsig);
-    buf_append_u32n(out, 0xffffffff);
+    buf_append_u32(out, 0xffffffff);
 }
 
 void txout_init(txout_t *txout, uint64_t value)
@@ -480,7 +513,7 @@ void txout_init(txout_t *txout, uint64_t value)
 
 void txout_serialize(txout_t *txout, buf_t *out)
 {
-    buf_append_u64n(out, txout->txvalue);
+    buf_append_u64(out, txout->txvalue);
     buf_append_varint(out, txout->pkscript.len);
     buf_append_buf(out, &txout->pkscript);
 }
@@ -495,7 +528,7 @@ void tx_init(tx_t *tx)
 
 void tx_serialize(tx_t *tx, buf_t *out)
 {
-    buf_append_u32n(out, tx->version);
+    buf_append_u32(out, tx->version);
 
     buf_append_varint(out, tx->incount);
     for (unsigned i = 0; i< tx->incount; i++)
@@ -505,7 +538,7 @@ void tx_serialize(tx_t *tx, buf_t *out)
     for (unsigned i = 0; i < tx->outcount; i++)
         txout_serialize(&tx->outputs[i], out);
 
-    buf_append_u32n(out, tx->locktime);
+    buf_append_u32(out, tx->locktime);
 }
 
 void tx_set_input(tx_t *tx, txin_t *txin)
@@ -580,7 +613,7 @@ void make_signedtx(uint8_t *privkey, uint8_t *pubkey, uint8_t *prevhash,
 
     buf_t buftosign = BUF_INIT;
     tx_serialize(&tx, &buftosign);
-    buf_append_u32n(&buftosign, 0x00000001);
+    buf_append_u32(&buftosign, 0x00000001);
 
     uint8_t signature[DERSIG_SIZE];
     tx_sign(&tx, &buftosign, privkey, signature);
@@ -589,6 +622,27 @@ void make_signedtx(uint8_t *privkey, uint8_t *pubkey, uint8_t *prevhash,
     make_scriptsig(&txin.scriptsig, signature, pubkey);
 
     tx_serialize(&tx, out);
+}
+
+void make_version(buf_t *out)
+{
+    buf_append_u32(out, 70001);                // version
+    buf_append_u64(out, SERVICES);             // services
+    buf_append_u64(out, (unsigned)time(NULL)); // timestamp
+
+    buf_append_nwaddr(out, "127.0.0.1");       // addr_recv
+    buf_append_nwaddr(out, "127.0.0.1");       // addr_from
+
+    uint64_t nonce = (((uint64_t)arc4random() << 32) | arc4random());
+    buf_append_u64(out, nonce);                // nonce
+    buf_append_varstr(out, "send-bitcoin");    // user-agent
+    buf_append_u32(out, 0);                    // height
+    buf_append_u8(out, 0xff);                  // relay
+}
+
+void make_pong(buf_t *out, uint64_t nonce)
+{
+    buf_append_u64(out, nonce);
 }
 
 void make_msg(char *cmd, buf_t *payload, buf_t *out)
@@ -602,14 +656,124 @@ void make_msg(char *cmd, buf_t *payload, buf_t *out)
 
     memcpy(cmdbuf, cmd, strlen(cmd));
 
-    buf_append_u32n(out, MAIN_MAGIC);
-    buf_append(out, cmdbuf, sizeof(cmdbuf));
-    buf_append_u32n(out, payload->len);
-    buf_append(out, checksum1, 4);
-    buf_append_buf(out, payload);
+    buf_append_u32(out, MAIN_MAGIC);         // magic
+    buf_append(out, cmdbuf, sizeof(cmdbuf)); // command
+    buf_append_u32(out, payload->len);       // length
+    buf_append(out, checksum1, 4);           // checksum
+    buf_append_buf(out, payload);            // payload
 }
 
-int send(int argc, char **argv)
+void handle_version(int sockfd, msghdr_t *header,
+                    uint8_t *payload, int incoming)
+{
+    char useragent[1024] = {0};
+
+    memcpy(useragent, payload + 81, payload[80]);
+    printf("user-agent:%s", useragent);
+
+    if (incoming) {
+        buf_t verack = BUF_INIT, verackmsg = BUF_INIT;
+        make_msg("verack", &verack, &verackmsg);
+
+        printf("\n");
+        peer_sendmsg(sockfd, &verackmsg);
+    }
+}
+
+void handle_alert(int sockfd, msghdr_t *header, uint8_t *payload, int incoming)
+{
+    char *hex = buftohex(payload, header->length);
+    printf("message:%s", hex);
+    free(hex);
+}
+
+void handle_ping(int sockfd, msghdr_t *header, uint8_t *payload, int incoming)
+{
+    uint64_t nonce = *(uint64_t *)payload;
+
+    if (incoming) {
+        buf_t pongpl = BUF_INIT, pongmsg = BUF_INIT;
+
+        make_pong(&pongpl, nonce);
+        make_msg("pong", &pongpl, &pongmsg);
+
+        printf("\n");
+        peer_sendmsg(sockfd, &pongmsg);
+    }
+}
+
+void handle_inv(int sockfd, msghdr_t *header, uint8_t *payload, int incoming)
+{
+    printf("#:%u", *payload);
+}
+
+cmdhandler_t handlers[] = {
+    { "version", handle_version },
+    { "alert",   handle_alert },
+    { "ping",    handle_ping },
+    { "inv",     handle_inv },
+    { NULL, NULL },
+};
+
+void handle_cmd(int sockfd, msghdr_t *header, uint8_t *payload, int incoming)
+{
+    printf("%c %s ", incoming ? '<' : '>', header->cmd);
+
+    for (unsigned i = 0; handlers[i].cmd; i++)
+        if (!strcmp(header->cmd, handlers[i].cmd)) {
+            handlers[i].func(sockfd, header, payload, incoming);
+            break;
+        }
+
+    printf("\n");
+}
+
+void peer_recv(int sockfd, void *buf, size_t length)
+{
+    ssize_t rc;
+
+    rc = recv(sockfd, buf, length, MSG_WAITALL);
+
+    if (rc < 0)
+        perror("recv");
+
+    if (rc != length)
+        errx("recv failure");
+}
+
+void peer_sendmsg(int sockfd, buf_t *msg)
+{
+    ssize_t rc;
+    msghdr_t *header;
+
+    header = (msghdr_t *)msg->data;
+
+    handle_cmd(sockfd, header, msg->data + sizeof(*header), 0);
+
+    rc = send(sockfd, msg->data, msg->len, 0);
+
+    if (rc < 0)
+        perror("send");
+
+    if (rc != msg->len)
+        errx("send failure (%lu)", rc);
+}
+
+void peer_rcvmsg(int sockfd)
+{
+    msghdr_t header;
+
+    peer_recv(sockfd, &header, sizeof(header));
+
+    uint8_t *payload = malloc(header.length);
+    peer_recv(sockfd, payload, header.length);
+
+    handle_cmd(sockfd, &header, payload, 1);
+
+    free(payload);
+}
+
+int sendtransac(int argc, char **argv)
 {
     int opt;
     uint64_t privlen, publen, prevhashlen;
@@ -656,13 +820,13 @@ int send(int argc, char **argv)
 
     make_msg("tx", &signedtx, &msg);
 
-#if 0
-    bufsec_t sections[] = {
+#if 1
+    bufsec_t txsects[] = {
         { "Magic",          4 },
         { "Command",       12 },
         { "Length",         4 },
         { "Checksum",       4 },
-        { "Version",        4 },
+        { "Tx-version",     4 },
         { "Input-count",    1 },
         { " Prev-Hash",    32 },
         { " Prev-Index",    4 },
@@ -682,8 +846,81 @@ int send(int argc, char **argv)
         { NULL, 0 },
     };
 
-    buf_dump(&msg, sections);
+    printf("TRANSACTION:\n");
+    buf_dump(&msg, txsects);
+    printf("\n");
 #endif
+
+
+    buf_t versionpl = BUF_INIT;
+    make_version(&versionpl);
+
+    buf_t versionmsg = BUF_INIT;
+    make_msg("version", &versionpl, &versionmsg);
+
+#if 1
+    bufsec_t versionsects[] = {
+        { "Magic",      4 },
+        { "Command",   12 },
+        { "Length",     4 },
+        { "Checksum",   4 },
+        { "Version",    4 },
+        { "Services",   8 },
+        { "Timestamp",  8 },
+        { "Addr-recv", 26 },
+        { "Addr-from", 26 },
+        { "Nonce",      8 },
+        { "User-agent",13 },
+        { "Height",     4 },
+        { "Relay",      1 },
+        { NULL,         0 },
+    };
+
+    printf("VERSION:\n");
+    buf_dump(&versionmsg, versionsects);
+    printf("\n");
+#endif
+
+    int sockfd, rc;
+    char *peerip = "71.202.109.111";
+
+    struct addrinfo hints, *servinfo, *p;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    rc = getaddrinfo(peerip, PORT, &hints, &servinfo);
+    if (rc != 0)
+        errx("getaddrinfo failed");
+
+    printf("connecting to %s\n", peerip);
+
+    for (p = servinfo; p != NULL; p = p->ai_next) {
+        sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (sockfd == -1) {
+            perror("socket");
+            continue;
+        }
+
+        rc = connect(sockfd, p->ai_addr, p->ai_addrlen);
+        if (rc == -1) {
+            close(sockfd);
+            perror("connect");
+        }
+
+        break;
+    }
+
+    if (p == NULL)
+        errx("failed to connect");
+
+    printf("connected!\n");
+
+    peer_sendmsg(sockfd, &versionmsg);
+
+    for (;;)
+        peer_rcvmsg(sockfd);
 
     free(privkey);
     free(pubkey);
@@ -723,7 +960,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[0], "info"))
         return info(argc, argv);
     else if (!strcmp(argv[0], "send"))
-        return send(argc, argv);
+        return sendtransac(argc, argv);
     else
         help();
 
