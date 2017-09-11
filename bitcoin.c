@@ -389,32 +389,24 @@ void buf_append_u8(buf_t *buf, uint8_t v)
     buf_append(buf, &v, sizeof(v));
 }
 
-void buf_append_u32n(buf_t *buf, uint32_t v)
+void buf_append_u16n(buf_t *buf, uint16_t v)
 {
-    uint32_t vn = 0;
+    uint16_t vn = 0;
 
-    vn |= (v >> 24) & 0x000000ff;
-    vn |= (v >>  8) & 0x0000ff00;
-    vn |= (v <<  8) & 0x00ff0000;
-    vn |= (v << 24) & 0xff000000;
+    vn |= (v >> 8) & 0x00ff;
+    vn |= (v << 8) & 0xff00;
 
     buf_append(buf, &vn, sizeof(vn));
 }
 
-void buf_append_u64n(buf_t *buf, uint64_t v)
+void buf_append_u32(buf_t *buf, uint32_t v)
 {
-    uint64_t vn = 0;
+    buf_append(buf, &v, sizeof(v));
+}
 
-    vn |= (v >> 56) & 0x00000000000000ff;
-    vn |= (v >> 40) & 0x000000000000ff00;
-    vn |= (v >> 24) & 0x0000000000ff0000;
-    vn |= (v >>  8) & 0x00000000ff000000;
-    vn |= (v <<  8) & 0x000000ff00000000;
-    vn |= (v << 24) & 0x0000ff0000000000;
-    vn |= (v << 40) & 0x00ff000000000000;
-    vn |= (v << 56) & 0xff00000000000000;
-
-    buf_append(buf, &vn, sizeof(vn));
+void buf_append_u64(buf_t *buf, uint64_t v)
+{
+    buf_append(buf, &v, sizeof(v));
 }
 
 void buf_append_varint(buf_t *buf, uint64_t v)
