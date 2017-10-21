@@ -643,7 +643,7 @@ void make_signedtx(uint8_t *privkey, uint8_t *pubkey, uint8_t *prevhash,
     tx_sign(&tx, &buftosign, privkey, signature);
 
     buf_reset(&txin.scriptsig);
-    make_scriptsig(&txin.scriptsig, signature, pubkey);
+    make_scriptsig(&txin.scriptsig, signature, srcpubkey);
 
     buf_t pl = BUF_INIT;
 
