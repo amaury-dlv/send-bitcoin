@@ -706,6 +706,27 @@ void handle_version(int sockfd, msghdr_t *header,
     }
 }
 
+void handle_reject(int sockfd, msghdr_t *header, uint8_t *payload, int incoming)
+{
+    char message[257] = {0}, reason[257] = {0};
+    uint8_t messagelen, code, reasonlen, reasonoffset;
+
+    messagelen = payload[0];
+    memcpy(message, payload + 1, messagelen);
+    message[messagelen] = '\0';
+
+    code = payload[messagelen + 1];
+
+    reasonoffset = messagelen + 2;
+    reasonlen = payload[reasonoffset];
+    memcpy(message, payload + reasonoffset + 1, reasonlen);
+
+    printf("\"%s\" code:0x%0x", message, code);
+
+    if (reasonlen)
+        printf(" reason:\"%s\"", reason);
+}
+
 void handle_alert(int sockfd, msghdr_t *header, uint8_t *payload, int incoming)
 {
     char *hex = buftohex(payload, header->length);
@@ -733,6 +754,7 @@ void handle_inv(int sockfd, msghdr_t *header, uint8_t *payload, int incoming)
 
 cmdhandler_t handlers[] = {
     { "version", handle_version },
+    { "reject",  handle_reject },
     { "alert",   handle_alert },
     { "ping",    handle_ping },
     { "inv",     handle_inv },
