@@ -15,8 +15,10 @@
 
 #define MAIN_MAGIC         0xD9B4BEF9
 #define SERVICES           0x1
-#define PORT               "8333"
-#define PORTN              8333
+#define PORT               8333
+#define PORTSTR            "8333"
+#define DNSSEED            "dnsseed.bitcoin.dashjr.org"
+#define SATOSHIS_PER_BTC   100000000
 
 struct buf_t;
 

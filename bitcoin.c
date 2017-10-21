@@ -336,7 +336,8 @@ void help(void)
     fprintf(stderr, "  send-bitcoin info <private key>\n");
     fprintf(stderr, "  send-bitcoin send -p <src private key>"
                     " -d <dst public key> -o <output hash>"
-                    " -v <satoshis> -i <output index>\n");
+                    " -i <output index> -v <total satoshis>"
+                    " -f <fee satoshis>\n");
 
     exit(1);
 }
@@ -457,7 +458,7 @@ void buf_append_nwaddr(buf_t *buf, char *ip)
 
     buf_append_u64(buf, SERVICES);
     buf_append(buf, addr, sizeof(addr));
-    buf_append_u16n(buf, PORTN);
+    buf_append_u16n(buf, PORT);
 }
 
 void buf_dump(buf_t *buf, bufsec_t sections[])
@@ -796,86 +797,7 @@ void peer_recvmsg(int sockfd)
     free(payload);
 }
 
-int sendtransac(int argc, char **argv)
-{
-    int opt;
-    uint64_t privlen, publen, prevhashlen;
-    uint8_t *privkey = NULL, *pubkey = NULL, *prevhash = NULL;
-    uint32_t outputindex = 0, satoshis = 0;
-
-    while ((opt = getopt(argc, argv, "p:d:o:i:v:")) != -1) {
-        switch (opt) {
-        case 'p':
-            privkey = hextobuf(optarg, &privlen);
-            break;
-        case 'd':
-            pubkey = hextobuf(optarg, &publen);
-            break;
-        case 'o':
-            prevhash = hextobuf(optarg, &prevhashlen);
-            break;
-        case 'i':
-            outputindex = atoi(optarg);
-            break;
-        case 'v':
-            satoshis = atoi(optarg);
-            break;
-        default:
-            help();
-            break;
-        }
-    }
-
-    if (!privlen || !publen || !prevhashlen || !satoshis)
-      help();
-
-    if (privlen != PRIVKEY_SIZE || publen != PUBKEY_SIZE || prevhashlen != 32)
-      errx("invalid key format");
-
-    buf_t tx = BUF_INIT;
-
-    make_signedtx(privkey, pubkey, prevhash, outputindex, satoshis, &tx);
-
-    printf("size: %lld\n", tx.len);
-    printf("payload: %s\n\n", buftohex(tx.data, tx.len));
-
-#if 0
-    bufsec_t txsects[] = {
-        { "Magic",          4 },
-        { "Command",       12 },
-        { "Length",         4 },
-        { "Checksum",       4 },
-        { "Tx-version",     4 },
-        { "Input-count",    1 },
-        { " Prev-Hash",    32 },
-        { " Prev-Index",    4 },
-        { " Script-Length", 1 },
-        { " ScriptSig",     1 },
-        { "  Signature",   70 },
-        { "  Hash-Push",    2 },
-        { "  Hash-type",   65 },
-        { " Sequence",      4 },
-        { "Output-count",   1 },
-        { " Satoshis",      8 },
-        { " Script-Length", 1 },
-        { " ScriptPubKey",  3 },
-        { "  Pubkey-hash", 20 },
-        { "  Verif-Check",  2 },
-        { "Locktime",       4 },
-        { NULL, 0 },
-    };
-
-    printf("TRANSACTION:\n");
-    buf_dump(&tx, txsects);
-    printf("\n");
-#endif
-
-    free(privkey);
-    free(pubkey);
-    free(prevhash);
-
-    return 0;
-}
+buf_t transaction = BUF_INIT;
 
 int snoop(int argc, char **argv)
 {
@@ -906,7 +828,7 @@ int snoop(int argc, char **argv)
 #endif
 
     int sockfd, rc;
-    char *peerip = "71.202.109.111";
+    char *dnsseed = DNSSEED;
 
     struct addrinfo hints, *servinfo, *p;
 
@@ -914,11 +836,11 @@ int snoop(int argc, char **argv)
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
-    rc = getaddrinfo(peerip, PORT, &hints, &servinfo);
+    rc = getaddrinfo(dnsseed, PORTSTR, &hints, &servinfo);
     if (rc != 0)
         errx("getaddrinfo failed");
 
-    printf("connecting to %s\n", peerip);
+    printf("connecting using %s\n", dnsseed);
 
     for (p = servinfo; p != NULL; p = p->ai_next) {
         sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
@@ -939,12 +861,122 @@ int snoop(int argc, char **argv)
     if (p == NULL)
         errx("failed to connect");
 
-    printf("connected!\n\n");
+    char peeraddr[INET6_ADDRSTRLEN] = {0};
+
+    inet_ntop(p->ai_family, p->ai_addr, peeraddr, sizeof(peeraddr));
+
+    printf("connected to %s!\n\n", peeraddr);
 
     peer_sendmsg(sockfd, &version);
 
+    peer_recvmsg(sockfd);
+    peer_recvmsg(sockfd);
+    peer_recvmsg(sockfd);
+    peer_recvmsg(sockfd);
+    peer_recvmsg(sockfd);
+
+    if (transaction.len > 0)
+        peer_sendmsg(sockfd, &transaction);
+
     for (;;)
         peer_recvmsg(sockfd);
+
+    return 0;
+}
+
+int sendtransac(int argc, char **argv)
+{
+    int opt;
+    uint64_t privlen, publen, prevhashlen;
+    uint8_t *privkey = NULL, *pubkey = NULL, *prevhash = NULL;
+    uint32_t outputindex = 0, satoshis = 0, fee = 0;
+
+    while ((opt = getopt(argc, argv, "p:d:o:i:v:f:")) != -1) {
+        switch (opt) {
+        case 'p':
+            privkey = hextobuf(optarg, &privlen);
+            break;
+        case 'd':
+            pubkey = hextobuf(optarg, &publen);
+            break;
+        case 'o':
+            prevhash = hextobuf(optarg, &prevhashlen);
+            break;
+        case 'i':
+            outputindex = atoi(optarg);
+            break;
+        case 'v':
+            satoshis = atoi(optarg);
+            break;
+        case 'f':
+            fee = atoi(optarg);
+            break;
+        default:
+            help();
+            break;
+        }
+    }
+
+    if (!privlen || !publen || !prevhashlen || !satoshis || !fee)
+        help();
+
+    if (privlen != PRIVKEY_SIZE || publen != PUBKEY_SIZE || prevhashlen != 32)
+        errx("invalid key format");
+
+    satoshis -= fee;
+
+    if (satoshis <= 0)
+        errx("invalid amount or fee");
+
+    double fee_btc = (double)fee / SATOSHIS_PER_BTC;
+    double bitcoins = (double)satoshis / SATOSHIS_PER_BTC;
+    printf("sending %f BTC (+fee: %f BTC)\n", bitcoins, fee_btc);
+
+    buf_t tx = BUF_INIT;
+
+    make_signedtx(privkey, pubkey, prevhash, outputindex, satoshis, &tx);
+
+#if 0
+    bufsec_t txsects[] = {
+        { "Magic",          4 },
+        { "Command",       12 },
+        { "Length",         4 },
+        { "Checksum",       4 },
+        { "Tx-version",     4 },
+        { "Input-count",    1 },
+        { " Prev-Hash",    32 },
+        { " Prev-Index",    4 },
+        { " Script-Length", 1 },
+        { " ScriptSig",     0 },
+        { "  Push",         1 },
+        { "  Signature",   70 },
+        { "  Hash",         1 },
+        { "  Push",         1 },
+        { "  Pubkey",      65 },
+        { " Sequence",      4 },
+        { "Output-count",   1 },
+        { " Satoshis",      8 },
+        { " Script-Length", 1 },
+        { " ScriptPubKey",  3 },
+        { "  Pubkey-hash", 20 },
+        { "  Verif",        1 },
+        { "  Check",        1 },
+        { "Locktime",       4 },
+        { NULL, 0 },
+    };
+
+    printf("TRANSACTION:\n");
+    buf_dump(&tx, txsects);
+    printf("\n");
+#endif
+
+    transaction = tx;
+
+    free(privkey);
+    free(pubkey);
+    free(prevhash);
+
+    snoop(0, NULL);
 
     return 0;
 }
