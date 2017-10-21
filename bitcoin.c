@@ -350,6 +350,10 @@ int gen(int argc, char **argv)
     else
         sha256_encode((uint8_t *)argv[1], strlen(argv[1]), privkey);
 
+    char *privstr = buftohex(privkey, sizeof(privkey));
+    printf("private key: %s\n", privstr);
+    free(privstr);
+
     char *wif = base58check_encode(0x80, privkey, sizeof(privkey));
     printf("WIF: %s\n", wif);
     free(wif);
